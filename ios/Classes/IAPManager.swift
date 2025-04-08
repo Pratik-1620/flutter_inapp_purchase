@@ -166,99 +166,83 @@ extension IAPManager {
                         /// Here we extra check we get transaction for product that we tried to purchase or not
                         /// If we get some other transaction then we return unknown error
                         if transaction.productType == .consumable {
-                            DispatchQueue.main.async {
-                                if transaction.productID == product.id {
-                                    self.channel.invokeMethod("purchase-updated", arguments: self.getJsonString(transactionData))
-                                } else {
-                                    self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
-                                        "responseCode": 500,
-                                        "debugMessage": "Purchase failed",
-                                        "code": "500",
-                                        "message": "Product id not match with transaction product id, may you device is jailbroken or something else"
-                                    ]))
-                                }
+                            if transaction.productID == product.id {
+                                self.channel.invokeMethod("purchase-updated", arguments: self.getJsonString(transactionData))
+                            } else {
+                                self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
+                                    "responseCode": 400,
+                                    "debugMessage": "Purchase failed",
+                                    "code": "E_PRODUCT_ID_MISMATCH",
+                                    "message": "Something went wrong. Please contact support."
+                                ]))
                             }
                             return
                         }
                         
                         /// Here we add currentEntitlements so we can re-verify about purchase and unlock premium according that
                         self.getActiveTransaction(success: { allPurchasedProductIds in
-                            DispatchQueue.main.async {
-                                if allPurchasedProductIds.contains(where: { $0.productID == product.id }) {
-                                    self.channel.invokeMethod("purchase-updated", arguments: self.getJsonString(transactionData))
-                                } else {
-                                    self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
-                                        "responseCode": 500,
-                                        "debugMessage": "Purchase failed",
-                                        "code": "500",
-                                        "message": "Product id not match with transaction product id, may you device is jailbroken or something else"
-                                    ]))
-                                }
-                            }
-                        }, failure: { error in
-                            DispatchQueue.main.async {
+                            if allPurchasedProductIds.contains(where: { $0.productID == product.id }) {
+                                self.channel.invokeMethod("purchase-updated", arguments: self.getJsonString(transactionData))
+                            } else {
                                 self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
-                                    "responseCode": 500,
-                                    "debugMessage": "Purchase failed",
-                                    "code": "500",
-                                    "message": "Can't find transaction"
+                                    "responseCode": 400,
+                                    "debugMessage": "Product ID mismatch after verification.",
+                                    "code": "E_PRODUCT_ID_MISMATCH",
+                                    "message": "Something went wrong. Please contact support."
                                 ]))
                             }
+                        }, failure: { error in
+                            self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
+                                "responseCode": 404,
+                                "debugMessage": "Transaction not found.",
+                                "code": "E_TRANSACTION_NOT_FOUND",
+                                "message": "We couldn't verify your purchase. Please try again later."
+                            ]))
                         })
                     }
                 case let .success(.unverified(_, error)):
                     debugPrint("Unverified purchase. Might be jailbroken. Error: \(error.localizedDescription)")
-                    DispatchQueue.main.async {
-                        self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
-                            "responseCode": 500,
-                            "debugMessage": "Purchase failed",
-                            "code": "500",
-                            "message": "Product id not match with transaction product id, may you device is jailbroken or something else"
-                        ]))
-                    }
+                    self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
+                        "responseCode": 403,
+                        "debugMessage": "Unverified purchase. Possibly jailbroken device.",
+                        "code": "E_UNVERIFIED_PURCHASE",
+                        "message": "We couldn’t verify your purchase."
+                    ]))
                     break
                 case .pending:
-                    DispatchQueue.main.async {
-                        self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
-                            "responseCode": 500,
-                            "debugMessage": "Purchase Pending",
-                            "code": "500",
-                            "message": "Your transaction goes in pending state"
-                        ]))
-                    }
+                    self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
+                        "responseCode": 202,
+                        "debugMessage": "Purchase is pending approval.",
+                        "code": "E_PURCHASE_PENDING",
+                        "message": "Your purchase is pending. Please wait or check with your payment provider."
+                    ]))
                     break
                 case .userCancelled:
                     debugPrint("User Cancelled!")
-                    DispatchQueue.main.async {
-                        self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
-                            "responseCode": 499,
-                            "debugMessage": "Purchase canceled",
-                            "code": "499",
-                            "message": "You canceled transaction"
-                        ]))
-                    }
+                    self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
+                        "responseCode": 499,
+                        "debugMessage": "User cancelled the transaction.",
+                        "code": "E_USER_CANCELLED",
+                        "message": "You cancelled the transaction."
+                    ]))
                     break
                 @unknown default:
-                    debugPrint("Failed to purchase the product!")
-                    DispatchQueue.main.async {
-                        self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
-                            "responseCode": 500,
-                            "debugMessage": "Unknown Error",
-                            "code": "500",
-                            "message": "Can't identify error"
-                        ]))
-                    }
-                }
-            } catch {
-                debugPrint("Failed to purchase the product!")
-                DispatchQueue.main.async {
+                    debugPrint("Unknown error while purchasing.")
                     self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
-                        "responseCode": 500,
-                        "debugMessage": "Unknown Error",
-                        "code": "499",
-                        "message": "\(error.localizedDescription)"
+                        "responseCode": 520,
+                        "debugMessage": "Unknown error occurred.",
+                        "code": "E_UNKNOWN",
+                        "message": "Something went wrong. Please try again later."
                     ]))
                 }
+            } catch {
+                debugPrint("Exception during purchase: \(error.localizedDescription)")
+                self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
+                    "responseCode": 500,
+                    "debugMessage": "\(error.localizedDescription)",
+                    "code": "E_PURCHASE_EXCEPTION",
+                    "message": "An unexpected error occurred. Please try again."
+                ]))
             }
         }
     }
@@ -394,17 +378,17 @@ extension IAPManager {
     @available(iOS 16.4, *)
     private func handlePromotionalOffer(success: @escaping (Transaction) -> Void, failure: @escaping (PurchaseError) -> Void) {
         Task {
-//            for await purchaseIntent in PurchaseIntent.intents {
-//                self.purchaseProduct(purchaseIntent.product.id, success: { purchasedProductIds in
-//                    DispatchQueue.main.async {
-//                        success(purchasedProductIds)
-//                    }
-//                }, failure: { error in
-//                    DispatchQueue.main.async {
-//                        failure(error)
-//                    }
-//                })
-//            }
+            //            for await purchaseIntent in PurchaseIntent.intents {
+            //                self.purchaseProduct(purchaseIntent.product.id, success: { purchasedProductIds in
+            //                    DispatchQueue.main.async {
+            //                        success(purchasedProductIds)
+            //                    }
+            //                }, failure: { error in
+            //                    DispatchQueue.main.async {
+            //                        failure(error)
+            //                    }
+            //                })
+            //            }
         }
     }
     
