@@ -336,31 +336,14 @@ extension IAPManager {
     /// This function is for restore purchase
     /// This functions success callback return available productIds that is currently active
     /// This function failure callback return enum in which if user purchased before but that is expired, user never purchased or any other error message
-    func restorePurchases(success: @escaping ([Transaction]) -> Void, failure: @escaping ((RestoreError) -> Void)) {
+    func syncWithAppStore(result: @escaping FlutterResult) {
         Task {
             do {
                 try await AppStore.sync()
-                self.getActiveTransaction(success: { activeTransaction in
-                    DispatchQueue.main.async {
-                        success(activeTransaction)
-                    }
-                }, failure: { error in
-                    /// Fetching All transaction of user in this app
-                    self.allTransactionOfUser(success: { _ in
-                        DispatchQueue.main.async {
-                            failure(.expired)
-                        }
-                    }, failure: { _ in
-                        DispatchQueue.main.async {
-                            failure(.neverPurchased)
-                        }
-                    })
-                })
+                result(true)
             } catch {
                 debugPrint(error.localizedDescription)
-                DispatchQueue.main.async {
-                    failure(.error(error.localizedDescription))
-                }
+                result(false)
             }
         }
     }

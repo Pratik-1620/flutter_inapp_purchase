@@ -45,6 +45,8 @@ public class FlutterInappPurchasePlugin: NSObject, FlutterPlugin {
             if let argument = call.arguments as? [String: Any], let transactionId = argument["transactionIdentifier"] as? String {
                 IAPManager.shared.completeTransaction(id: transactionId, result: result)
             }
+        } else if call.method == "appStoreSync" {
+            IAPManager.shared.syncWithAppStore(result: result)
         } else if call.method == "clearTransaction" {
             result(FlutterMethodNotImplemented) // Dont know about it
         } else if call.method == "getAvailableItems" {

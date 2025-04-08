@@ -294,6 +294,17 @@ class FlutterInappPurchase {
         code: _platform.operatingSystem, message: "platform not supported");
   }
 
+// Restore Purchase
+  Future<bool> restorePurchases() async {
+    if (_platform.isAndroid) {
+      return true;
+    } else if (_platform.isIOS) {
+      return await _channel.invokeMethod('appStoreSync');
+    }
+    throw PlatformException(
+        code: _platform.operatingSystem, message: "platform not supported");
+  }
+
   /// Request a subscription on `Android` or `iOS`.
   /// Result will be received in `purchaseUpdated` listener or `purchaseError` listener.
   ///
