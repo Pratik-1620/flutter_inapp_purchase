@@ -27,6 +27,7 @@ enum RestoreError {
 final class IAPManager {
     static let shared = IAPManager()
     private var products: [Product] = []
+    private var pendingTransaction: [Transaction] = []
     var isProductLoaded: Bool = false
     var channel: FlutterMethodChannel!
     
@@ -59,10 +60,7 @@ extension IAPManager {
             for await verificationResult in Transaction.updates {
                 switch verificationResult {
                 case .verified(let transaction):
-                    Task {
-                        await transaction.finish()
-                        debugPrint(transaction)
-                    }
+                    self.pendingTransaction.append(transaction)
                 case .unverified(_, let error):
                     debugPrint("Unverified transaction: \(error.localizedDescription)")
                 }
@@ -150,7 +148,7 @@ extension IAPManager {
                 switch result {
                 case let .success(.verified(transaction)):
                     Task {
-                        await transaction.finish()
+                        self.pendingTransaction.append(transaction)
                         debugPrint("Completed purchase with Transaction: \(transaction)")
                         
                         let transactionData = [
@@ -417,6 +415,31 @@ extension IAPManager {
             return introOffer
         }
         return nil
+    }
+    
+    func getPendingTransaction(result: @escaping FlutterResult) {
+        var pendingTransactions: [[String: Any]] = []
+        Task {
+            for transaction in self.pendingTransaction {
+                pendingTransactions.append([
+                    "productId": transaction.productID,
+                    "transactionId": "\(transaction.id)",
+                    "transactionDate": "\(transaction.purchaseDate.timeIntervalSince1970)",
+                    "originalTransactionDateIOS": "\(transaction.originalPurchaseDate.timeIntervalSince1970)",
+                    "originalTransactionIdentifierIOS": "\(transaction.originalID)",
+                    "transactionStateIOS": await transaction.subscriptionStatus?.state.rawValue ?? -1
+                ])
+            }
+            result(pendingTransactions)
+        }
+    }
+    
+    func completeTransaction(id: String, result: @escaping FlutterResult) {
+        guard let transaction = self.pendingTransaction.first(where: { String($0.id) == id }) else { return }
+        Task {
+            await transaction.finish()
+            result(id)
+        }
     }
 }
 

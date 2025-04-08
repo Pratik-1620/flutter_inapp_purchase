@@ -40,9 +40,11 @@ public class FlutterInappPurchasePlugin: NSObject, FlutterPlugin {
         } else if call.method == "requestReceipt" {
             result(FlutterMethodNotImplemented)
         } else if call.method == "getPendingTransactions" {
-            result(FlutterMethodNotImplemented) // No Need for that
+            IAPManager.shared.getPendingTransaction(result: result)
         } else if call.method == "finishTransaction" {
-            result(FlutterMethodNotImplemented) // No need for that
+            if let argument = call.arguments as? [String: Any], let transactionId = argument["transactionIdentifier"] as? String {
+                IAPManager.shared.completeTransaction(id: transactionId, result: result)
+            }
         } else if call.method == "clearTransaction" {
             result(FlutterMethodNotImplemented) // Dont know about it
         } else if call.method == "getAvailableItems" {
