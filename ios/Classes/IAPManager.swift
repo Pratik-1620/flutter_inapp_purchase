@@ -3,31 +3,10 @@ import Flutter
 
 typealias FailureCallBack = (String) -> Void
 
-enum ProductLoadError {
-    case inValidProductIds /// This case happens whenever productId passed was mismatch with original productIds
-    case notLoadedProductIds([String]) /// This case happen while some product not load and return that product id
-    case error(String) /// This case return error message
-}
-
-enum PurchaseError {
-    case pending  /// This case return if transaction goes in pending state
-    case userCancelled /// This case happen if user cancel purchase while purchasing product
-    case unverified /// This case happen if transaction can't verify
-    case unknown /// This case happen if can't identify error
-    case error(String) /// This case return error message
-}
-
-enum RestoreError {
-    case expired /// This case happen if user try restore and purchased was expired
-    case neverPurchased /// This case happen if user never purchased any product
-    case error(String) /// This case return error message
-}
-
-@available(iOS 15.0, *)
 final class IAPManager {
     static let shared = IAPManager()
     private var products: [Product] = []
-    private var pendingTransaction: [Transaction] = []
+    private var appStoreInitiatedProduct: Product?
     var isProductLoaded: Bool = false
     var channel: FlutterMethodChannel!
     
@@ -41,26 +20,21 @@ final class IAPManager {
         
         /// Initialise handler for promotional offer
         if #available(iOS 16.4, *) {
-            self.handlePromotionalOffer(success: { _ in
-                
-            }, failure: { _ in
-                
-            })
+            self.handlePromotionalOffer()
         }
     }
 }
 
 // MARK: - Transaction Listener Method
-@available(iOS 15.0, *)
 extension IAPManager {
-    
-    ///  This Method Listen about pending transaction or some refund transaction so here we can finish that transaction
+    /// This Method Listen about pending transaction or some refund transaction so here we can finish that transaction
     private func listenForTransactionUpdates() {
         Task {
             for await verificationResult in Transaction.updates {
                 switch verificationResult {
                 case .verified(let transaction):
-                    self.pendingTransaction.append(transaction)
+                    debugPrint("Verified transaction found: \(transaction.productID)")
+                    break
                 case .unverified(_, let error):
                     debugPrint("Unverified transaction: \(error.localizedDescription)")
                 }
@@ -70,7 +44,6 @@ extension IAPManager {
 }
 
 // MARK: - Product load and purchase
-@available(iOS 15.0, *)
 extension IAPManager {
     
     /// This Method help to load Products with productIDs supplied in argument
@@ -80,53 +53,17 @@ extension IAPManager {
         Task {
             do {
                 let availableProducts = try await Product.products(for: productIDs)
-                
-                var products: [[String: Any]] = []
-                for product in availableProducts {
-                    var json: [String: Any] = [:]
-                    json["productId"] = product.id
-                    json["price"] = "\(product.price)"
-                    json["currency"] = product.priceFormatStyle.currencyCode
-                    json["localizedPrice"] = product.displayPrice
-                    json["title"] = product.displayName
-                    json["description"] = product.description
-                    if let introOffer = product.subscription?.introductoryOffer {
-                        json["introductoryPrice"] = "\(introOffer.price)"
-                        json["introductoryPricePaymentModeIOS"] = introOffer.paymentMode.rawValue
-                        json["introductoryPriceNumberOfPeriodsIOS"] = introOffer.period.unit.debugDescription
-                        json["introductoryPriceSubscriptionPeriodIOS"] = introOffer.period.value.description
-                        json["introductoryPriceNumberIOS"] = "\(introOffer.price)"
-                    }
-                    if let subscriptionPeriod = product.subscription?.subscriptionPeriod {
-                        json["subscriptionPeriodNumberIOS"] = "\(subscriptionPeriod.value)"
-                        json["subscriptionPeriodUnitIOS"] = "\(subscriptionPeriod.unit)"
-                    }
-                    products.append(json)
-                }
-                
-                
+
                 if availableProducts.count == productIDs.count {
                     self.isProductLoaded = true
                     self.products = availableProducts
-                    DispatchQueue.main.async {
-                        result(products)
-                    }
-                } else if self.products.isEmpty {
-                    DispatchQueue.main.async {
-                        result("Product load failed")
-                    }
+                    result(availableProducts.map({ self.getProductJson(from: $0) }))
                 } else {
-                    let loadedProductIDs = self.products.map { $0.id }
-                    let failedProductIDs = productIDs.filter { !loadedProductIDs.contains($0) }
-                    DispatchQueue.main.async {
-                        result("Product load failed for \(failedProductIDs)")
-                    }
+                    result(FlutterError(code: "E_ITEM_UNAVAILABLE", message: "Sorry, but this product is currently not available in the store.", details: nil))
                 }
             } catch {
                 debugPrint(error.localizedDescription)
-                DispatchQueue.main.async {
-                    result("Some product can't be loaded")
-                }
+                result(FlutterError(code: "E_ITEM_UNAVAILABLE", message: "Sorry, but this product is currently not available in the store.", details: nil))
             }
         }
     }
@@ -134,44 +71,51 @@ extension IAPManager {
     /// This function is for purchase Product
     /// This function success completion return current product id if purchase success and verified
     ///  This function failure return PurchaseError enum if transaction have any problem or successful transaction cant verify then it simply return in error variable or if transaction get pending or userCanceled or unknown then return according it
-    func purchaseProduct(_ productId: String, result: FlutterResult) {
-        guard let product = self.products.first(where: { $0.id == productId }), let viewController = getTopViewController() else { return }
+    func purchaseProduct(_ productId: String, product: Product? = nil, withOffer: [String: Any]? = nil, quantity: Int = 1, result: FlutterResult?) {
+        guard let product = product != nil ? product : self.products.first(where: { $0.id == productId }), let viewController = getTopViewController() else {
+            self.channel.invokeMethod("purchase-error", arguments: self.getJsonString(["debugMessage": "Invalid product ID.", "code": "E_DEVELOPER_ERROR", "message": "Invalid product ID."]))
+            return
+        }
         Task {
             do {
                 var result: Product.PurchaseResult
+                
+                var purchaseOption = Product.PurchaseOption.quantity(quantity)
+                if let offer = withOffer, let offerId = offer["identifier"] as? String, let keyId = offer["keyIdentifier"] as? String, let offerNonce = offer["nonce"] as? String, let signature = offer["signature"] as? Data, let timeStamp = offer["timestamp"] as? Int {
+                    purchaseOption = Product.PurchaseOption.promotionalOffer(
+                        offerID: offerId,
+                        keyID: keyId,
+                        nonce: UUID(uuidString: offerNonce)!,
+                        signature: signature,
+                        timestamp: timeStamp
+                    )
+                }
+                
                 if #available(iOS 18.2, *) {
-                    result = try await product.purchase(confirmIn: viewController)
+                    result = try await product.purchase(confirmIn: viewController, options: [purchaseOption])
                 } else {
                     // Fallback on earlier versions
-                    result = try await product.purchase()
+                    result = try await product.purchase(options: [purchaseOption])
                 }
                 switch result {
                 case let .success(.verified(transaction)):
                     Task {
-                        self.pendingTransaction.append(transaction)
                         debugPrint("Completed purchase with Transaction: \(transaction)")
-                        
-                        let transactionData = [
-                            "productId": transaction.productID,
-                            "transactionId": "\(transaction.id)",
-                            "transactionDate": "\(transaction.purchaseDate.timeIntervalSince1970)",
-                            "originalTransactionDateIOS": "\(transaction.originalPurchaseDate.timeIntervalSince1970)",
-                            "originalTransactionIdentifierIOS": "\(transaction.originalID)",
-                            "transactionStateIOS": 1
-                        ]
-                        
+                
                         /// For the consumable products only because currentEntitlements not return consumable products
                         /// Here we extra check we get transaction for product that we tried to purchase or not
                         /// If we get some other transaction then we return unknown error
                         if transaction.productType == .consumable {
                             if transaction.productID == product.id {
-                                self.channel.invokeMethod("purchase-updated", arguments: self.getJsonString(transactionData))
+                                Task {
+                                    self.channel.invokeMethod("purchase-updated", arguments: self.getJsonString(await self.getTransactionJson(from: transaction)))
+                                }
                             } else {
                                 self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
                                     "responseCode": 400,
                                     "debugMessage": "Purchase failed",
-                                    "code": "E_PRODUCT_ID_MISMATCH",
-                                    "message": "Something went wrong. Please contact support."
+                                    "code": "E_USER_ERROR",
+                                    "message": "Oops! Payment information invalid. Did you enter your password correctly?"
                                 ]))
                             }
                             return
@@ -180,13 +124,15 @@ extension IAPManager {
                         /// Here we add currentEntitlements so we can re-verify about purchase and unlock premium according that
                         self.getActiveTransaction(success: { allPurchasedProductIds in
                             if allPurchasedProductIds.contains(where: { $0.productID == product.id }) {
-                                self.channel.invokeMethod("purchase-updated", arguments: self.getJsonString(transactionData))
+                                Task {
+                                    self.channel.invokeMethod("purchase-updated", arguments: self.getJsonString(await self.getTransactionJson(from: transaction)))
+                                }
                             } else {
                                 self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
                                     "responseCode": 400,
                                     "debugMessage": "Product ID mismatch after verification.",
-                                    "code": "E_PRODUCT_ID_MISMATCH",
-                                    "message": "Something went wrong. Please contact support."
+                                    "code": "E_USER_ERROR",
+                                    "message": "Oops! Payment information invalid. Did you enter your password correctly?"
                                 ]))
                             }
                         }, failure: { error in
@@ -203,16 +149,16 @@ extension IAPManager {
                     self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
                         "responseCode": 403,
                         "debugMessage": "Unverified purchase. Possibly jailbroken device.",
-                        "code": "E_UNVERIFIED_PURCHASE",
-                        "message": "We couldn’t verify your purchase."
+                        "code": "E_SERVICE_ERROR",
+                        "message": "Unable to process the transaction: your device is not allowed to make purchases."
                     ]))
                     break
                 case .pending:
                     self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
                         "responseCode": 202,
                         "debugMessage": "Purchase is pending approval.",
-                        "code": "E_PURCHASE_PENDING",
-                        "message": "Your purchase is pending. Please wait or check with your payment provider."
+                        "code": "E_USER_ERROR",
+                        "message": "Payment is not allowed on this device. If you are the one authorized to make purchases on this device, you can turn payments on in Settings."
                     ]))
                     break
                 case .userCancelled:
@@ -221,7 +167,7 @@ extension IAPManager {
                         "responseCode": 499,
                         "debugMessage": "User cancelled the transaction.",
                         "code": "E_USER_CANCELLED",
-                        "message": "You cancelled the transaction."
+                        "message": "Cancelled."
                     ]))
                     break
                 @unknown default:
@@ -230,7 +176,7 @@ extension IAPManager {
                         "responseCode": 520,
                         "debugMessage": "Unknown error occurred.",
                         "code": "E_UNKNOWN",
-                        "message": "Something went wrong. Please try again later."
+                        "message": "An unknown or unexpected error has occurred. Please try again later."
                     ]))
                 }
             } catch {
@@ -238,8 +184,8 @@ extension IAPManager {
                 self.channel.invokeMethod("purchase-error", arguments: self.getJsonString([
                     "responseCode": 500,
                     "debugMessage": "\(error.localizedDescription)",
-                    "code": "E_PURCHASE_EXCEPTION",
-                    "message": "An unexpected error occurred. Please try again."
+                    "code": "E_UNKNOWN",
+                    "message": "An unknown or unexpected error has occurred. Please try again later."
                 ]))
             }
         }
@@ -247,9 +193,7 @@ extension IAPManager {
 }
 
 // MARK: - Transaction Information Methods
-@available(iOS 15.0, *)
 extension IAPManager {
-    
     /// This function fetch all active transaction
     /// This functions success callback return productIds of currently active plans
     /// This function failure callback return failure message if no plan has been purchased or verified transaction is currently not active
@@ -286,51 +230,14 @@ extension IAPManager {
             }
             var transactionData: [[String: Any]] = []
             for transaction in purchasedPlan {
-                transactionData.append([
-                    "productId": transaction.productID,
-                    "transactionId": "\(transaction.id)",
-                    "transactionDate": "\(transaction.purchaseDate.timeIntervalSince1970)",
-                    "originalTransactionDateIOS": "\(transaction.originalPurchaseDate.timeIntervalSince1970)",
-                    "originalTransactionIdentifierIOS": "\(transaction.originalID)"
-                ])
+                await transactionData.append(self.getTransactionJson(from: transaction))
             }
             result(transactionData)
-        }
-    }
-    
-    /// This function check transaction is of trial period or purchase period
-    /// This will return expire date it it is in trial period
-    func checkIsThisTrialPeriod(in transaction: Transaction) -> Date? {
-        if #available(iOS 17.2, *) {
-            if transaction.offer?.paymentMode == .freeTrial { return transaction.expirationDate }
-        } else {
-            if transaction.offerType == .introductory { return transaction.expirationDate }
-        }
-        return nil
-    }
-    
-    /// This Function get all transaction details
-    /// This function success callback return all purchased plan id
-    /// This function failure callback return error message that user never purchased anything
-    private func allTransactionOfUser(success: @escaping ([Transaction]) -> Void, failure: @escaping FailureCallBack) {
-        Task {
-            var allPurchasedProductIds: [Transaction] = []
-            for await result in Transaction.all {
-                switch result {
-                case .unverified(_, let error):
-                    debugPrint("Unverified Error: \(error.localizedDescription)")
-                    break
-                case .verified(let transaction):
-                    allPurchasedProductIds.append(transaction)
-                }
-            }
-            allPurchasedProductIds.isEmpty ? failure("No Plan Purchased before") : success(Array(allPurchasedProductIds))
         }
     }
 }
 
 // MARK: - Restore Purchase
-@available(iOS 15.0, *)
 extension IAPManager {
     
     /// This function is for restore purchase
@@ -350,84 +257,224 @@ extension IAPManager {
 }
 
 // MARK: - Promotional Offer Handler
-@available(iOS 15.0, *)
 extension IAPManager {
     
     /// This is for promotional purchase
     /// This function return success completion for productId of try to purchase product if purchased successfully
     /// This function return failure completion for any error in purchase
     @available(iOS 16.4, *)
-    private func handlePromotionalOffer(success: @escaping (Transaction) -> Void, failure: @escaping (PurchaseError) -> Void) {
+    private func handlePromotionalOffer() {
         Task {
-            //            for await purchaseIntent in PurchaseIntent.intents {
-            //                self.purchaseProduct(purchaseIntent.product.id, success: { purchasedProductIds in
-            //                    DispatchQueue.main.async {
-            //                        success(purchasedProductIds)
-            //                    }
-            //                }, failure: { error in
-            //                    DispatchQueue.main.async {
-            //                        failure(error)
-            //                    }
-            //                })
-            //            }
+            for await purchaseIntent in PurchaseIntent.intents {
+                self.appStoreInitiatedProduct = purchaseIntent.product
+                self.channel.invokeMethod("iap-promoted-product", arguments: purchaseIntent.id)
+            }
         }
-    }
-    
-    private func getTopViewController() -> UIViewController? {
-        guard let window = UIApplication.shared.windows.first(where: { $0.isKeyWindow }) else { return nil }
-        var topVC = window.rootViewController
-        while let presentedVC = topVC?.presentedViewController {
-            topVC = presentedVC
-        }
-        return topVC
     }
 }
 
 // MARK: - Product Helping method
-@available(iOS 15.0, *)
 extension IAPManager {
-    /// This function return available product list
-    func getProductsData() -> [Product] {
-        return self.products
-    }
-    
-    /// This function find intro offer in product if plan have that offer and check user is eligible for it or not
-    /// If user eligible for offer then it return subscription offer
-    func getIntroOffer(from product: Product) async -> Product.SubscriptionOffer? {
-        if let introOffer = product.subscription?.introductoryOffer, (await product.subscription?.isEligibleForIntroOffer == true) {
-            return introOffer
-        }
-        return nil
-    }
-    
     func getPendingTransaction(result: @escaping FlutterResult) {
         var pendingTransactions: [[String: Any]] = []
         Task {
-            for transaction in self.pendingTransaction {
-                pendingTransactions.append([
-                    "productId": transaction.productID,
-                    "transactionId": "\(transaction.id)",
-                    "transactionDate": "\(transaction.purchaseDate.timeIntervalSince1970)",
-                    "originalTransactionDateIOS": "\(transaction.originalPurchaseDate.timeIntervalSince1970)",
-                    "originalTransactionIdentifierIOS": "\(transaction.originalID)",
-                    "transactionStateIOS": await transaction.subscriptionStatus?.state.rawValue ?? -1
-                ])
+            for await result in Transaction.unfinished {
+                switch result {
+                case .unverified(_, let error):
+                    debugPrint("Unverified Error: \(error.localizedDescription)")
+                    break
+                case .verified(let transaction):
+                    debugPrint("Pending Transaction: \(transaction.productID)")
+                    await pendingTransactions.append(self.getTransactionJson(from: transaction))
+                }
             }
             result(pendingTransactions)
         }
     }
     
     func completeTransaction(id: String, result: @escaping FlutterResult) {
-        guard let transaction = self.pendingTransaction.first(where: { String($0.id) == id }) else { return }
         Task {
-            await transaction.finish()
-            result(id)
+            for await resut in Transaction.unfinished {
+                switch resut {
+                case .unverified(_, _):
+                    break
+                case .verified(let transaction):
+                    if String(transaction.id) == id {
+                        await transaction.finish()
+                        result(id)
+                    }
+                }
+            }
+        }
+    }
+    
+    func showRedeemCodeSheet(result: @escaping FlutterResult) {
+        if #available(iOS 16.0, *), let windowScene = UIApplication.shared.connectedScenes
+            .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene  {
+            Task {
+                do {
+                    try await AppStore.presentOfferCodeRedeemSheet(in: windowScene)
+                    result("present PromoCodes")
+                } catch {
+                    result("can't able to present PromoCodes")
+                }
+            }
+        }  else {
+            result("the functionality is available starting from ios 16.0")
+        }
+    }
+    
+    func getAppStoreInitiatedProducts(result: @escaping FlutterResult) {
+        if let product = self.appStoreInitiatedProduct {
+            result([self.getProductJson(from: product)])
+        } else {
+            result([])
+        }
+    }
+    
+    func clearAllTransaction(result: @escaping FlutterResult) {
+        Task {
+            for await result in Transaction.unfinished {
+                switch result {
+                case .unverified(_, _):
+                    break
+                case .verified(let transaction):
+                    await transaction.finish()
+                }
+            }
+            result("Cleared transactions")
+        }
+    }
+    
+    func getPromotedProduct(result: @escaping FlutterResult) {
+        result(self.appStoreInitiatedProduct?.id ?? NSNull())
+    }
+    
+    func requestPromotedProduct(result: FlutterResult) {
+        if let product = self.appStoreInitiatedProduct {
+            self.appStoreInitiatedProduct = nil
+            self.purchaseProduct("", product: product, result: nil)
+            result(product.id)
+        } else {
+            result(FlutterError(code: "E_DEVELOPER_ERROR", message: "Invalid product ID.", details: nil))
         }
     }
 }
 
-// MARK: - Util Methods
+// MARK: - Utility Methods
 extension IAPManager {
+    private func getTransactionJson(from transaction: Transaction) async -> [String: Any] {
+        return [
+            "productId": transaction.productID,
+            "transactionId": "\(transaction.id)",
+            "transactionDate": "\(transaction.purchaseDate.timeIntervalSince1970)",
+            "originalTransactionDateIOS": "\(transaction.originalPurchaseDate.timeIntervalSince1970)",
+            "originalTransactionIdentifierIOS": "\(transaction.originalID)",
+            "transactionStateIOS": await transaction.subscriptionStatus?.state.rawValue ?? -1
+        ]
+    }
+    
+    private func getProductJson(from product: Product) -> [String: Any] {
+        var json: [String: Any] = [:]
+        json["productId"] = product.id
+        json["price"] = "\(product.price)"
+        json["currency"] = product.priceFormatStyle.currencyCode
+        json["localizedPrice"] = product.displayPrice
+        json["title"] = product.displayName
+        json["description"] = product.description
+        if let introOffer = product.subscription?.introductoryOffer {
+            var paymentMode = ""
+            var numberOfPeriods = "0"
+            switch introOffer.paymentMode {
+            case .freeTrial:
+                paymentMode = "FREETRIAL"
+                numberOfPeriods = "\(introOffer.period.value)"
+            case .payAsYouGo:
+                paymentMode = "PAYASYOUGO"
+                numberOfPeriods = "\(introOffer.periodCount)"
+            case .payUpFront:
+                paymentMode = "PAYUPFRONT"
+                numberOfPeriods = "\(introOffer.period.value)"
+            default:
+                break
+            }
+            var subscriptionPeriods = ""
+            switch introOffer.period.unit {
+            case .day: 
+                subscriptionPeriods = "DAY"
+            case .week: 
+                subscriptionPeriods = "WEEK"
+            case .month: 
+                subscriptionPeriods = "MONTH"
+            case .year: 
+                subscriptionPeriods = "YEAR"
+            default: 
+                subscriptionPeriods = ""
+            }
+            json["introductoryPrice"] = introOffer.displayPrice
+            json["introductoryPricePaymentModeIOS"] = paymentMode
+            json["introductoryPriceNumberOfPeriodsIOS"] = numberOfPeriods
+            json["introductoryPriceSubscriptionPeriodIOS"] = subscriptionPeriods
+            json["introductoryPriceNumberIOS"] = "\(introOffer.price)"
+        }
+        
+        if let subscriptionOffer = product.subscription?.promotionalOffers {
+            var discounts: [[String: Any]] = []
+            
+            for discount in subscriptionOffer {
+                var paymentMode = ""
+                var numberOfPeriods = "0"
+                switch discount.paymentMode {
+                case .freeTrial:
+                    paymentMode = "FREETRIAL"
+                    numberOfPeriods = "\(discount.period.value)"
+                case .payAsYouGo:
+                    paymentMode = "PAYASYOUGO"
+                    numberOfPeriods = "\(discount.periodCount)"
+                case .payUpFront:
+                    paymentMode = "PAYUPFRONT"
+                    numberOfPeriods = "\(discount.period.value)"
+                default:
+                    break
+                }
+                var subscriptionPeriods = ""
+                switch discount.period.unit {
+                case .day: subscriptionPeriods = "DAY"
+                case .week: subscriptionPeriods = "WEEK"
+                case .month: subscriptionPeriods = "MONTH"
+                case .year: subscriptionPeriods = "YEAR"
+                @unknown default: subscriptionPeriods = ""
+                }
+                var discountType = ""
+                if #available(iOS 12.2, *) {
+                    switch discount.type {
+                    case .introductory: discountType = "INTRODUCTORY"
+                    case .promotional: discountType = "SUBSCRIPTION"
+                    default: discountType = ""
+                    }
+                }
+                
+                discounts.append([
+                    "identifier": discount.id ?? "",
+                    "type": discountType,
+                    "numberOfPeriods": numberOfPeriods,
+                    "price": "\(discount.price)",
+                    "localizedPrice": discount.displayPrice,
+                    "paymentMode" : paymentMode,
+                    "subscriptionPeriod": subscriptionPeriods
+                ])
+            }
+            json["discounts"] = discounts
+        }
+        
+        if let subscriptionPeriod = product.subscription?.subscriptionPeriod {
+            json["subscriptionPeriodNumberIOS"] = "\(subscriptionPeriod.value)"
+            json["subscriptionPeriodUnitIOS"] = "\(subscriptionPeriod.unit)"
+        }
+    
+        return json
+    }
+    
     private func getJsonString(_ dict: [String: Any]) -> String? {
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: dict, options: [])
@@ -436,5 +483,14 @@ extension IAPManager {
             debugPrint("Error: \(error.localizedDescription)")
         }
         return nil
+    }
+    
+    private func getTopViewController() -> UIViewController? {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene, let window = windowScene.windows.first else { return nil }
+        var topVC = window.rootViewController
+        while let presentedVC = topVC?.presentedViewController {
+            topVC = presentedVC
+        }
+        return topVC
     }
 }
